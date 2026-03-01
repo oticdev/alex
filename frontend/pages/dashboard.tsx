@@ -192,9 +192,22 @@ export default function Dashboard() {
           setInstruments(instrumentsMap);
         }
 
-        // Get last analysis date
-        // This would come from the jobs endpoint in a real implementation
-        setLastAnalysisDate(null);
+        // Get last analysis date from jobs endpoint
+        const jobsResponse = await fetch(`${API_URL}/api/jobs`, {
+          headers: {
+            "Authorization": `Bearer ${token}`,
+          },
+        });
+
+        if (jobsResponse.ok) {
+          const jobsData = await jobsResponse.json();
+          const lastJob = (jobsData.jobs || []).find(
+            (job: { status: string }) => job.status === "completed"
+          );
+          if (lastJob) {
+            setLastAnalysisDate(lastJob.completed_at || lastJob.created_at);
+          }
+        }
 
       } catch (err) {
         console.error("Error loading data:", err);
