@@ -76,10 +76,10 @@ async def run_orchestrator(job_id: str) -> None:
             
             # Mark job as completed after all agents finish
             db.jobs.update_status(job_id, "completed")
-            logger.info(f"Planner: Job {job_id} completed successfully")
+            logger.info(json.dumps({"event_type": "JOB_COMPLETED", "agent": "planner", "job_id": job_id}))
             
     except Exception as e:
-        logger.error(f"Planner: Error in orchestration: {e}", exc_info=True)
+        logger.error(json.dumps({"event_type": "JOB_FAILED", "agent": "planner", "job_id": job_id, "error": str(e)}))
         db.jobs.update_status(job_id, 'failed', error_message=str(e))
         raise
 
@@ -99,7 +99,7 @@ def lambda_handler(event, context):
     # Wrap entire handler with observability context
     with observe():
         try:
-            logger.info(f"Planner Lambda invoked with event: {json.dumps(event)[:500]}")
+            logger.info(json.dumps({"event_type": "JOB_STARTED", "agent": "planner", "job_id": event.get("job_id", "unknown")}))
 
             # Extract job_id from SQS message
             if 'Records' in event and len(event['Records']) > 0:
@@ -136,7 +136,7 @@ def lambda_handler(event, context):
             }
 
         except Exception as e:
-            logger.error(f"Planner: Error in lambda handler: {e}", exc_info=True)
+            logger.error(json.dumps({"event_type": "JOB_FAILED", "agent": "planner", "error": str(e)}))
             return {
                 'statusCode': 500,
                 'body': json.dumps({

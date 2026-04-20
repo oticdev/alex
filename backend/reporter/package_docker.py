@@ -81,6 +81,7 @@ def package_lambda():
         shutil.copy(reporter_dir / "templates.py", package_dir)
         shutil.copy(reporter_dir / "observability.py", package_dir)
         shutil.copy(reporter_dir / "judge.py", package_dir)
+        shutil.copy(backend_dir / "guardrails.py", package_dir / "guardrails.py")
 
         # Create the zip file
         zip_path = reporter_dir / "reporter_lambda.zip"

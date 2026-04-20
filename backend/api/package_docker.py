@@ -66,6 +66,11 @@ def main():
         else:
             print(f"Warning: Database package not found at {database_src}")
 
+        guardrails_src = backend_dir / "guardrails.py"
+        if guardrails_src.exists():
+            shutil.copy2(guardrails_src, package_dir / "guardrails.py")
+            print(f"Copied {guardrails_src}")
+
         # Create requirements.txt from pyproject.toml
         requirements_file = package_dir / "requirements.txt"
         with open(requirements_file, "w") as f:

@@ -79,6 +79,7 @@ def package_lambda():
         shutil.copy(planner_dir / "market.py", package_dir)
         shutil.copy(planner_dir / "prices.py", package_dir)
         shutil.copy(planner_dir / "observability.py", package_dir)
+        shutil.copy(backend_dir / "guardrails.py", package_dir / "guardrails.py")
         
         # Create the zip file
         zip_path = planner_dir / "planner_lambda.zip"

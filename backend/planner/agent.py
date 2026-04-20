@@ -2,9 +2,20 @@
 Financial Planner Orchestrator Agent - coordinates portfolio analysis across specialized agents.
 """
 
+import sys
+from pathlib import Path
+
+_here = Path(__file__).resolve().parent
+for _p in (_here, _here.parent):
+    if (_p / "guardrails.py").exists():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+
 import os
 import json
 import boto3
+import asyncio
 import logging
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -12,6 +23,9 @@ from dataclasses import dataclass
 
 from agents import function_tool, RunContextWrapper
 from agents.extensions.models.litellm_model import LitellmModel
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+
+from guardrails import is_retryable_boto_client_error, lambda_invoke_request_response
 
 logger = logging.getLogger()
 
@@ -32,6 +46,21 @@ class PlannerContext:
     job_id: str
 
 
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception(is_retryable_boto_client_error),
+    reraise=True,
+)
+def _invoke_lambda_with_retry(
+    function_name: str, payload: Dict[str, Any], unwrap: bool = True
+) -> Dict[str, Any]:
+    """Synchronous Lambda invoke with retries for transient AWS client errors."""
+    return lambda_invoke_request_response(
+        lambda_client, function_name, payload, unwrap=unwrap
+    )
+
+
 async def invoke_lambda_agent(
     agent_name: str, function_name: str, payload: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -45,23 +74,9 @@ async def invoke_lambda_agent(
     try:
         logger.info(f"Invoking {agent_name} Lambda: {function_name}")
 
-        response = lambda_client.invoke(
-            FunctionName=function_name,
-            InvocationType="RequestResponse",
-            Payload=json.dumps(payload),
+        result = await asyncio.to_thread(
+            _invoke_lambda_with_retry, function_name, payload, True
         )
-
-        result = json.loads(response["Payload"].read())
-
-        # Unwrap Lambda response if it has the standard format
-        if isinstance(result, dict) and "statusCode" in result and "body" in result:
-            if isinstance(result["body"], str):
-                try:
-                    result = json.loads(result["body"])
-                except json.JSONDecodeError:
-                    result = {"message": result["body"]}
-            else:
-                result = result["body"]
 
         logger.info(f"{agent_name} completed successfully")
         return result
@@ -111,23 +126,18 @@ def handle_missing_instruments(job_id: str, db) -> None:
         )
 
         try:
-            response = lambda_client.invoke(
-                FunctionName=TAGGER_FUNCTION,
-                InvocationType="RequestResponse",
-                Payload=json.dumps({"instruments": missing}),
+            result = _invoke_lambda_with_retry(
+                TAGGER_FUNCTION, {"instruments": missing}, False
             )
 
-            result = json.loads(response["Payload"].read())
-
-            if isinstance(result, dict) and "statusCode" in result:
-                if result["statusCode"] == 200:
-                    logger.info(
-                        f"Planner: InstrumentTagger completed - Tagged {len(missing)} instruments"
-                    )
-                else:
-                    logger.error(
-                        f"Planner: InstrumentTagger failed with status {result['statusCode']}"
-                    )
+            if isinstance(result, dict) and result.get("statusCode") == 200:
+                logger.info(
+                    f"Planner: InstrumentTagger completed - Tagged {len(missing)} instruments"
+                )
+            else:
+                logger.error(
+                    f"Planner: InstrumentTagger failed with response: {result!r}"
+                )
 
         except Exception as e:
             logger.error(f"Planner: Error tagging instruments: {e}")

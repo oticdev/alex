@@ -492,7 +492,7 @@ Let's check what our agents created in the database:
 **In directory**: `backend`
 
 ```bash
-uv run check_jobs.py
+uv run check_job_details.py
 ```
 
 This shows recent analysis jobs with their status and results. You'll see:

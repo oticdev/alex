@@ -2,6 +2,16 @@
 Report Writer Agent Lambda Handler
 """
 
+import sys
+from pathlib import Path
+
+_here = Path(__file__).resolve().parent
+for _p in (_here, _here.parent):
+    if (_p / "guardrails.py").exists():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+
 import os
 import json
 import asyncio
@@ -29,6 +39,7 @@ from src import Database
 from templates import REPORTER_INSTRUCTIONS
 from agent import create_agent, ReporterContext
 from observability import observe
+from guardrails import truncate_response
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -81,6 +92,8 @@ async def run_reporter_agent(
                     logger.error(f"Reporter score is too low: {score}")
                     response = "I'm sorry, I'm not able to generate a report for you. Please try again later."
 
+        response = truncate_response(response or "")
+
         # Save the report to database
         report_payload = {
             "content": response,
@@ -115,8 +128,9 @@ def lambda_handler(event, context):
     """
     # Wrap entire handler with observability context
     with observe() as observability:
+        job_id = "unknown"
         try:
-            logger.info(f"Reporter Lambda invoked with event: {json.dumps(event)[:500]}")
+            logger.info(json.dumps({"event_type": "JOB_STARTED", "agent": "reporter", "job_id": event.get("job_id", "unknown")}))
 
             # Parse event
             if isinstance(event, str):
@@ -213,12 +227,12 @@ def lambda_handler(event, context):
                 run_reporter_agent(job_id, portfolio_data, user_data, db, observability)
             )
 
-            logger.info(f"Reporter completed for job {job_id}")
+            logger.info(json.dumps({"event_type": "JOB_COMPLETED", "agent": "reporter", "job_id": job_id}))
 
             return {"statusCode": 200, "body": json.dumps(result)}
 
         except Exception as e:
-            logger.error(f"Error in reporter: {e}", exc_info=True)
+            logger.error(json.dumps({"event_type": "JOB_FAILED", "agent": "reporter", "job_id": job_id, "error": str(e)}))
             return {"statusCode": 500, "body": json.dumps({"success": False, "error": str(e)})}
 
 

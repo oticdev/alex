@@ -31,8 +31,7 @@ async def process_instruments(instruments: List[Dict[str, str]]) -> Dict[str, An
     Returns:
         Processing results
     """
-    # Run the classification
-    logger.info(f"Classifying {len(instruments)} instruments")
+    logger.info(json.dumps({"event_type": "TAGGER_STARTED", "agent": "tagger", "instrument_count": len(instruments)}))
     classifications = await tag_instruments(instruments)
     
     # Update database with classifications
@@ -117,8 +116,8 @@ def lambda_handler(event, context):
                     'body': json.dumps({'error': 'No instruments provided'})
                 }
 
-            # Process all instruments in a single async context
             result = asyncio.run(process_instruments(instruments))
+            logger.info(json.dumps({"event_type": "TAGGER_COMPLETED", "agent": "tagger", "tagged": result.get("tagged", 0), "errors": len(result.get("errors", []))}))
 
             return {
                 'statusCode': 200,
@@ -126,7 +125,7 @@ def lambda_handler(event, context):
             }
 
         except Exception as e:
-            logger.error(f"Lambda handler error: {e}")
+            logger.error(json.dumps({"event_type": "TAGGER_FAILED", "agent": "tagger", "error": str(e)}))
             return {
                 'statusCode': 500,
                 'body': json.dumps({'error': str(e)})

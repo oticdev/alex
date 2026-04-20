@@ -2,6 +2,16 @@
 Chart Maker Agent Lambda Handler
 """
 
+import sys
+from pathlib import Path
+
+_here = Path(__file__).resolve().parent
+for _p in (_here, _here.parent):
+    if (_p / "guardrails.py").exists():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+
 import os
 import json
 import asyncio
@@ -24,6 +34,7 @@ from src import Database
 from templates import CHARTER_INSTRUCTIONS
 from agent import create_agent
 from observability import observe
+from guardrails import validate_charts_document
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -56,18 +67,16 @@ async def run_charter_agent(job_id: str, portfolio_data: Dict[str, Any], db=None
         
         # Extract and parse JSON from the output
         output = result.final_output
-        logger.info(f"Charter: Agent completed, output length: {len(output) if output else 0}")
-        
-        # Log the actual output for debugging
+        logger.debug(f"Charter: Agent completed, output length: {len(output) if output else 0}")
+
         if output:
-            logger.info(f"Charter: Output preview (first 1000 chars): {output[:1000]}")
+            logger.debug(f"Charter: Output preview (first 1000 chars): {output[:1000]}")
         else:
             logger.warning("Charter: Agent returned empty output!")
-            # Check if there were any messages
             if hasattr(result, 'messages') and result.messages:
-                logger.info(f"Charter: Number of messages: {len(result.messages)}")
+                logger.debug(f"Charter: Number of messages: {len(result.messages)}")
                 for i, msg in enumerate(result.messages):
-                    logger.info(f"Charter: Message {i}: {str(msg)[:500]}")
+                    logger.debug(f"Charter: Message {i}: {str(msg)[:500]}")
         
         # Parse the JSON output
         charts_data = None
@@ -81,13 +90,18 @@ async def run_charter_agent(job_id: str, portfolio_data: Dict[str, Any], db=None
             
             if start_idx >= 0 and end_idx > start_idx:
                 json_str = output[start_idx:end_idx + 1]
-                logger.info(f"Charter: Extracted JSON substring, length: {len(json_str)}")
-                
+                logger.debug(f"Charter: Extracted JSON substring, length: {len(json_str)}")
+
                 try:
                     parsed_data = json.loads(json_str)
-                    charts = parsed_data.get('charts', [])
-                    logger.info(f"Charter: Successfully parsed JSON, found {len(charts)} charts")
-                    
+                    ok, validation_error = validate_charts_document(parsed_data)
+                    if not ok:
+                        logger.error(f"Charter: Chart output failed validation: {validation_error}")
+                        parsed_data = None
+
+                    charts = parsed_data.get("charts", []) if parsed_data else []
+                    logger.debug(f"Charter: Successfully parsed JSON, found {len(charts)} charts")
+
                     if charts:
                         # Build the charts_payload with chart keys as top-level keys
                         charts_data = {}
@@ -97,14 +111,14 @@ async def run_charter_agent(job_id: str, portfolio_data: Dict[str, Any], db=None
                             chart_copy = {k: v for k, v in chart.items() if k != 'key'}
                             charts_data[chart_key] = chart_copy
                         
-                        logger.info(f"Charter: Created charts_data with keys: {list(charts_data.keys())}")
-                        
+                        logger.debug(f"Charter: Created charts_data with keys: {list(charts_data.keys())}")
+
                         # Save to database
                         if db and charts_data:
                             try:
                                 success = db.jobs.update_charts(job_id, charts_data)
                                 charts_saved = bool(success)
-                                logger.info(f"Charter: Database update returned: {success}")
+                                logger.debug(f"Charter: Database update returned: {success}")
                             except Exception as e:
                                 logger.error(f"Charter: Database error: {e}")
                     else:
@@ -136,8 +150,9 @@ def lambda_handler(event, context):
     """
     # Wrap entire handler with observability context
     with observe():
+        job_id = "unknown"
         try:
-            logger.info(f"Charter Lambda invoked with event keys: {list(event.keys()) if isinstance(event, dict) else 'not a dict'}")
+            logger.info(json.dumps({"event_type": "JOB_STARTED", "agent": "charter", "job_id": event.get("job_id", "unknown") if isinstance(event, dict) else "unknown"}))
 
             # Parse event
             if isinstance(event, str):
@@ -211,7 +226,7 @@ def lambda_handler(event, context):
             # Run the agent
             result = asyncio.run(run_charter_agent(job_id, portfolio_data, db))
 
-            logger.info(f"Charter completed for job {job_id}: {result}")
+            logger.info(json.dumps({"event_type": "JOB_COMPLETED", "agent": "charter", "job_id": job_id, "charts_generated": result.get("charts_generated", 0)}))
 
             return {
                 'statusCode': 200,
@@ -219,7 +234,7 @@ def lambda_handler(event, context):
             }
 
         except Exception as e:
-            logger.error(f"Error in charter: {e}", exc_info=True)
+            logger.error(json.dumps({"event_type": "JOB_FAILED", "agent": "charter", "job_id": job_id, "error": str(e)}))
             return {
                 'statusCode': 500,
                 'body': json.dumps({

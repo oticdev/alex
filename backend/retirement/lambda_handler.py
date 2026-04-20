@@ -132,8 +132,9 @@ def lambda_handler(event, context):
     """
     # Wrap entire handler with observability context
     with observe() as observability:
+        job_id = "unknown"
         try:
-            logger.info(f"Retirement Lambda invoked with event: {json.dumps(event)[:500]}")
+            logger.info(json.dumps({"event_type": "JOB_STARTED", "agent": "retirement", "job_id": event.get("job_id", "unknown")}))
 
             # Parse event
             if isinstance(event, str):
@@ -215,7 +216,7 @@ def lambda_handler(event, context):
             # Run the agent
             result = asyncio.run(run_retirement_agent(job_id, portfolio_data))
 
-            logger.info(f"Retirement completed for job {job_id}")
+            logger.info(json.dumps({"event_type": "JOB_COMPLETED", "agent": "retirement", "job_id": job_id}))
 
             return {
                 'statusCode': 200,
@@ -223,7 +224,7 @@ def lambda_handler(event, context):
             }
 
         except Exception as e:
-            logger.error(f"Error in retirement: {e}", exc_info=True)
+            logger.error(json.dumps({"event_type": "JOB_FAILED", "agent": "retirement", "job_id": job_id, "error": str(e)}))
             return {
                 'statusCode': 500,
                 'body': json.dumps({

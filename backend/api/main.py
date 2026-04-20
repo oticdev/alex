@@ -3,6 +3,16 @@ FastAPI backend for Alex Financial Advisor
 Handles all API routes with Clerk JWT authentication
 """
 
+import sys
+from pathlib import Path
+
+_here = Path(__file__).resolve().parent
+for _p in (_here, _here.parent):
+    if (_p / "guardrails.py").exists():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+
 import os
 import json
 import logging
@@ -28,6 +38,7 @@ from src.schemas import (
     JobCreate, JobUpdate,
     JobType, JobStatus
 )
+from guardrails import sanitize_jsonable, sanitize_user_input
 
 # Load environment variables
 load_dotenv(override=True)
@@ -90,6 +101,17 @@ async def general_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": "An unexpected error occurred. Our team has been notified."}
     )
+
+class StructuredLogger:
+    @staticmethod
+    def log_event(event_type, user_id=None, details=None):
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "event_type": event_type,
+            "user_id": user_id,
+            "details": details
+        }
+        logger.info(json.dumps(log_entry))
 
 # Initialize services
 db = Database()
@@ -202,6 +224,8 @@ async def update_user(user_update: UserUpdate, clerk_user_id: str = Depends(get_
 
         # Update user - users table uses clerk_user_id as primary key
         update_data = user_update.model_dump(exclude_unset=True)
+        if "display_name" in update_data and update_data["display_name"] is not None:
+            update_data["display_name"] = sanitize_user_input(update_data["display_name"])
 
         # Use the database client directly since users table has clerk_user_id as PK
         db.users.db.update(
@@ -242,11 +266,13 @@ async def create_account(account: AccountCreate, clerk_user_id: str = Depends(ge
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Create account
+        # Create account (sanitize free-text fields for downstream agents)
         account_id = db.accounts.create_account(
             clerk_user_id=clerk_user_id,
-            account_name=account.account_name,
-            account_purpose=account.account_purpose,
+            account_name=sanitize_user_input(account.account_name),
+            account_purpose=sanitize_user_input(account.account_purpose)
+            if account.account_purpose
+            else None,
             cash_balance=getattr(account, 'cash_balance', Decimal('0'))
         )
 
@@ -274,6 +300,10 @@ async def update_account(account_id: str, account_update: AccountUpdate, clerk_u
 
         # Update account
         update_data = account_update.model_dump(exclude_unset=True)
+        if "account_name" in update_data and update_data["account_name"] is not None:
+            update_data["account_name"] = sanitize_user_input(update_data["account_name"])
+        if "account_purpose" in update_data and update_data["account_purpose"] is not None:
+            update_data["account_purpose"] = sanitize_user_input(update_data["account_purpose"])
         db.accounts.update(account_id, update_data)
 
         # Return updated account
@@ -500,15 +530,24 @@ async def trigger_analysis(request: AnalyzeRequest, clerk_user_id: str = Depends
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Create job
+        # Create job (sanitize options dict — may flow into agent pipelines)
+        safe_payload = request.model_dump()
+        safe_payload["options"] = sanitize_jsonable(safe_payload.get("options") or {})
+
         job_id = db.jobs.create_job(
             clerk_user_id=clerk_user_id,
             job_type="portfolio_analysis",
-            request_payload=request.model_dump()
+            request_payload=safe_payload
         )
 
         # Get the created job
         job = db.jobs.find_by_id(job_id)
+
+        StructuredLogger.log_event(
+            "ANALYSIS_TRIGGERED",
+            user_id=clerk_user_id,
+            details={"analysis_type": request.analysis_type, "job_id": str(job_id)}
+        )
 
         # Send to SQS
         if SQS_QUEUE_URL:
@@ -516,7 +555,7 @@ async def trigger_analysis(request: AnalyzeRequest, clerk_user_id: str = Depends
                 'job_id': str(job_id),
                 'clerk_user_id': clerk_user_id,
                 'analysis_type': request.analysis_type,
-                'options': request.options
+                'options': safe_payload["options"],
             }
 
             sqs_client.send_message(
